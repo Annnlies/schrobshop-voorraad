@@ -11,12 +11,13 @@ een voorraad.csv die WooCommerce (via Code Snippets) inleest.
 Werkt voor simpele EN configureerbare (Vikan e.d.) producten.
 
 PROXY (optioneel): als de omgevingsvariabelen PROXY_SERVER / PROXY_USERNAME /
-PROXY_PASSWORD gezet zijn, gaat al het verkeer via een residential proxy. Dat is
-nodig om de zwaardere Vikan-pagina's te kunnen lezen (Rauwerda blokkeert anders
-datacenter-IP's). Zonder die variabelen draait hij gewoon zonder proxy.
+PROXY_PASSWORD gezet zijn, gaat al het verkeer via een residential proxy.
+Zonder die variabelen draait hij gewoon zonder proxy.
 
-Afbeeldingen/fonts/media worden geblokkeerd om dataverbruik (en proxy-kosten)
-minimaal te houden.
+Draait in HEADED modus (echte browser) onder xvfb op de server; dat ontsluit
+configureerbare pagina's die een headless browser niet prijsgeeft.
+
+Afbeeldingen/fonts/media worden geblokkeerd om dataverbruik minimaal te houden.
 
 VEILIG BIJ TWIJFEL: een product wordt alleen weggeschreven als de status met
 zekerheid is vastgesteld; lukt het laden niet, dan wordt het OVERGESLAGEN i.p.v.
@@ -104,8 +105,7 @@ def _status(page):
 def lees(page, url):
     for poging in range(1, POGINGEN + 1):
         try:
-            wachten = "networkidle" if poging == 1 else "domcontentloaded"
-            page.goto(url, wait_until=wachten, timeout=TIMEOUT)
+            page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT)
             _dismiss_cookies(page)
             try:
                 page.wait_for_selector("h1", timeout=15000)
@@ -144,10 +144,10 @@ def main():
     vandaag = datetime.date.today().isoformat()
     resultaten, mislukt = {}, []
     proxy = _proxy()
-    print("Proxy actief" if proxy else "Geen proxy (datacenter-IP)")
+    print("Proxy actief" if proxy else "Geen proxy")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, proxy=proxy,
+        browser = p.chromium.launch(headless=False, proxy=proxy,
                                     args=["--disable-blink-features=AutomationControlled"])
         ctx = browser.new_context(
             locale="nl-NL",
