@@ -20,6 +20,7 @@ jobs:
 
       - name: Installeer dependencies
         run: |
+          sudo apt-get update && sudo apt-get install -y xvfb
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
@@ -28,7 +29,7 @@ jobs:
           PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
           PROXY_USERNAME: ${{ secrets.PROXY_USERNAME }}
           PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
-        run: python scraper.py
+        run: xvfb-run -a python scraper.py
 
       - name: Commit voorraad.csv
         run: |
