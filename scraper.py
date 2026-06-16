@@ -8,16 +8,23 @@ een voorraad.csv die WooCommerce (via Code Snippets) inleest.
 - Invoer : mapping.csv  (kolommen: woocommerce_sku, product, ar_url)
 - Uitvoer: voorraad.csv (kolommen: sku, stock_status, prijs_excl_btw, gecontroleerd_op)
 
-Werkt voor zowel simpele als configureerbare (Vikan e.d.) producten: de pagina
-toont in beide gevallen een schema.org-voorraadstatus.
+Werkt voor simpele EN configureerbare (Vikan e.d.) producten.
+
+PROXY (optioneel): als de omgevingsvariabelen PROXY_SERVER / PROXY_USERNAME /
+PROXY_PASSWORD gezet zijn, gaat al het verkeer via een residential proxy. Dat is
+nodig om de zwaardere Vikan-pagina's te kunnen lezen (Rauwerda blokkeert anders
+datacenter-IP's). Zonder die variabelen draait hij gewoon zonder proxy.
+
+Afbeeldingen/fonts/media worden geblokkeerd om dataverbruik (en proxy-kosten)
+minimaal te houden.
 
 VEILIG BIJ TWIJFEL: een product wordt alleen weggeschreven als de status met
-zekerheid is vastgesteld. Lukt het laden niet (bot-horde / time-out), dan wordt
-het OVERGESLAGEN i.p.v. foutief op 'uitverkocht' gezet. Per run worden niet-
-gelezen producten aan het eind nogmaals geprobeerd.
+zekerheid is vastgesteld; lukt het laden niet, dan wordt het OVERGESLAGEN i.p.v.
+foutief op 'uitverkocht' gezet. Niet-gelezen producten krijgen een tweede ronde.
 """
 
 import csv
+import os
 import sys
 import time
 import random
@@ -38,6 +45,22 @@ Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
 window.chrome = window.chrome || {runtime: {}};
 """
 
+BLOK = {"image", "media", "font", "stylesheet"}
+
+
+def _proxy():
+    server = os.environ.get("PROXY_SERVER", "").strip()
+    if not server:
+        return None
+    p = {"server": server}
+    u = os.environ.get("PROXY_USERNAME", "").strip()
+    w = os.environ.get("PROXY_PASSWORD", "").strip()
+    if u:
+        p["username"] = u
+    if w:
+        p["password"] = w
+    return p
+
 
 def _dismiss_cookies(page):
     for tekst in ("Alle cookies weigeren", "Accepteer alle cookies", "Accepteer", "Weigeren"):
@@ -52,7 +75,6 @@ def _dismiss_cookies(page):
 
 
 def _status(page):
-    """Bepaal 'instock'/'outofstock'/None op een geladen productpagina."""
     try:
         el = page.locator('[itemprop="availability"]').first
         if el.count():
@@ -80,7 +102,6 @@ def _status(page):
 
 
 def lees(page, url):
-    """Open een AR-productpagina met meerdere pogingen; retourneer (status, prijs)."""
     for poging in range(1, POGINGEN + 1):
         try:
             wachten = "networkidle" if poging == 1 else "domcontentloaded"
@@ -122,9 +143,12 @@ def main():
 
     vandaag = datetime.date.today().isoformat()
     resultaten, mislukt = {}, []
+    proxy = _proxy()
+    print("Proxy actief" if proxy else "Geen proxy (datacenter-IP)")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+        browser = p.chromium.launch(headless=True, proxy=proxy,
+                                    args=["--disable-blink-features=AutomationControlled"])
         ctx = browser.new_context(
             locale="nl-NL",
             user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -133,6 +157,8 @@ def main():
             extra_http_headers={"Accept-Language": "nl-NL,nl;q=0.9,en;q=0.8"},
         )
         ctx.add_init_script(STEALTH)
+        ctx.route("**/*", lambda route: route.abort()
+                  if route.request.resource_type in BLOK else route.continue_())
         page = ctx.new_page()
 
         def verwerk(rij):
