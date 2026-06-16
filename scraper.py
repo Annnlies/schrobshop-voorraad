@@ -8,9 +8,10 @@ een voorraad.csv die WP All Import in WooCommerce inleest.
 - Invoer : mapping.csv  (kolommen: woocommerce_sku, product, ar_url)
 - Uitvoer: voorraad.csv (kolommen: sku, stock_status, prijs_excl_btw, gecontroleerd_op)
 
-stock_status is 'instock' of 'outofstock' (exact de waarden die WooCommerce gebruikt).
-Producten die niet gelezen konden worden, worden NIET weggeschreven, zodat WP All
-Import ze met rust laat (liever overslaan dan per ongeluk op uitverkocht zetten).
+VEILIG BIJ TWIJFEL: een product wordt alleen weggeschreven als de status met
+zekerheid is vastgesteld. Laadt de pagina niet of is de status onduidelijk, dan
+wordt het product OVERGESLAGEN (WooCommerce blijft ongemoeid) i.p.v. per ongeluk
+op 'uitverkocht' gezet.
 """
 
 import csv
@@ -22,60 +23,86 @@ from playwright.sync_api import sync_playwright
 BASE = Path(__file__).parent
 MAPPING = BASE / "mapping.csv"
 OUTPUT = BASE / "voorraad.csv"
-TIMEOUT = 30000  # ms per pagina
+TIMEOUT = 45000  # ms
 
 
-def lees_status(page, url):
-    """Open een AR-productpagina en bepaal voorraad + prijs. Retourneert (status, prijs) of (None, None)."""
-    page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT)
-
-    # Cookiebanner best-effort wegklikken (blokkeert anders soms de render)
-    for tekst in ("Alle cookies weigeren", "Accepteer alle cookies"):
+def _dismiss_cookies(page):
+    for tekst in ("Alle cookies weigeren", "Accepteer alle cookies", "Accepteer", "Weigeren"):
         try:
             knop = page.get_by_role("button", name=tekst)
             if knop.count():
                 knop.first.click(timeout=2000)
-                break
+                page.wait_for_timeout(500)
+                return
         except Exception:
             pass
 
-    # 1) Betrouwbaarste signaal: schema.org availability
-    status = None
+
+def _bepaal_status(page):
+    """Bepaal status op een geladen productpagina. Retourneert 'instock'/'outofstock'/None."""
+    # 1) schema.org availability (betrouwbaarst)
     try:
         el = page.locator('[itemprop="availability"]').first
         if el.count():
             val = (el.get_attribute("href") or el.get_attribute("content") or "")
             if "InStock" in val:
-                status = "instock"
-            elif "OutOfStock" in val:
-                status = "outofstock"
+                return "instock"
+            if "OutOfStock" in val:
+                return "outofstock"
     except Exception:
         pass
-
-    # 2) Fallback: aanwezigheid van een actieve 'In Winkelwagen'-knop
-    if status is None:
-        try:
-            knop = page.locator("button.tocart, #product-addtocart-button").first
-            if knop.count() and knop.is_enabled():
-                status = "instock"
-            else:
-                status = "outofstock"
-        except Exception:
-            status = None
-
-    # Prijs excl. btw (laagste getoonde prijs); puur informatief, mag leeg
-    prijs = ""
+    # 2) positieve in-stock indicatoren
     try:
-        import re
-        tekst = page.locator("body").inner_text()
-        bedragen = re.findall(r"€\s*([0-9]+[.,][0-9]{2})", tekst)
-        if bedragen:
-            prijs = min(float(b.replace(".", "").replace(",", ".")) for b in bedragen)
-            prijs = f"{prijs:.2f}"
+        if page.locator("button.tocart, #product-addtocart-button").first.is_enabled(timeout=2000):
+            return "instock"
     except Exception:
         pass
+    try:
+        body = page.locator("body").inner_text().lower()
+    except Exception:
+        body = ""
+    if "direct leverbaar" in body:
+        return "instock"
+    # 3) expliciete uitverkocht-tekst
+    if any(t in body for t in ["niet op voorraad", "uitverkocht", "niet leverbaar", "tijdelijk niet leverbaar"]):
+        return "outofstock"
+    # 4) onbekend -> overslaan
+    return None
 
-    return status, prijs
+
+def lees(page, url):
+    """Open een AR-productpagina (met 1 retry) en bepaal status + prijs."""
+    for poging in (1, 2):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT)
+            _dismiss_cookies(page)
+            # wacht tot de echte productpagina geladen is
+            try:
+                page.wait_for_selector("h1", timeout=15000)
+            except Exception:
+                continue  # pagina niet geladen -> retry
+            # geef availability/JS even de tijd
+            try:
+                page.wait_for_selector('[itemprop="availability"], button.tocart', timeout=8000)
+            except Exception:
+                page.wait_for_timeout(1500)
+            status = _bepaal_status(page)
+            if status:
+                prijs = ""
+                try:
+                    import re
+                    tekst = page.locator("body").inner_text()
+                    bedragen = re.findall(r"€\s*([0-9]+[.,][0-9]{2})", tekst)
+                    if bedragen:
+                        laagste = min(float(b.replace(".", "").replace(",", ".")) for b in bedragen)
+                        prijs = f"{laagste:.2f}"
+                except Exception:
+                    pass
+                return status, prijs
+        except Exception as e:
+            print(f"  poging {poging} fout: {e}", file=sys.stderr)
+        page.wait_for_timeout(2000)
+    return None, ""
 
 
 def main():
@@ -91,24 +118,25 @@ def main():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page(user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"))
+        ctx = browser.new_context(
+            locale="nl-NL",
+            user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+            viewport={"width": 1280, "height": 900},
+        )
+        page = ctx.new_page()
         for r in rijen:
             sku = r["woocommerce_sku"].strip()
             url = r["ar_url"].strip()
-            try:
-                status, prijs = lees_status(page, url)
-            except Exception as e:
-                status, prijs = None, ""
-                print(f"FOUT {sku} {url}: {e}", file=sys.stderr)
+            status, prijs = lees(page, url)
             if status:
                 resultaten.append({"sku": sku, "stock_status": status,
                                    "prijs_excl_btw": prijs, "gecontroleerd_op": vandaag})
-                print(f"OK   {sku:15} {status:10} €{prijs}")
+                print(f"OK   {sku:15} {status:10} EUR{prijs}")
             else:
                 mislukt.append(sku)
-                print(f"SKIP {sku:15} (status onbekend)")
+                print(f"SKIP {sku:15} (status onbekend - overgeslagen)")
+            page.wait_for_timeout(1500)
         browser.close()
 
     with open(OUTPUT, "w", newline="", encoding="utf-8") as f:
