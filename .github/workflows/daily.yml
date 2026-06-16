@@ -24,6 +24,10 @@ jobs:
           python -m playwright install --with-deps chromium
 
       - name: Draai scraper
+        env:
+          PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
+          PROXY_USERNAME: ${{ secrets.PROXY_USERNAME }}
+          PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
         run: python scraper.py
 
       - name: Commit voorraad.csv
@@ -33,8 +37,3 @@ jobs:
           git add voorraad.csv
           git commit -m "voorraad update $(date +%F)" || echo "geen wijziging"
           git push
-
-      # Optioneel: laat WP All Import direct na de update importeren.
-      # Plak hieronder je 'trigger'-URL uit WP All Import en haal het #-teken weg.
-      # - name: Trigger WP All Import
-      #   run: curl -s "PLAK_HIER_JE_WP_ALL_IMPORT_TRIGGER_URL"
